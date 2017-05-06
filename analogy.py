@@ -16,8 +16,16 @@
 
 __version__ = '0.1'
 
+# Built-in Python Modules
 import os
 import argparse
+
+# Scientific & Imaging Libraries
+import numpy as np
+import scipy.ndimage, scipy.misc
+
+# Numeric Computing (GPU)
+import torch, torch.autograd, torchvision.models, torchvision.transforms
 
 
 # Configure all options to be passed in from the command-line.
@@ -57,13 +65,6 @@ def warn(message, *lines):
 print("""{}   {}\nTransformation and resynthesis of images powered by Deep Learning!{}
   - Code licensed as AGPLv3, models under CC BY-NC-SA.{}""".format(ansi.CYAN_B, __doc__, ansi.CYAN, ansi.ENDC))
 
-# Scientific & Imaging Libraries
-import numpy as np
-import scipy.ndimage, scipy.misc
-
-# Numeric Computing (GPU)
-import torch, torch.autograd, torchvision.models, torchvision.transforms
-
 
 #======================================================================================================================
 # Convolution Network
@@ -92,15 +93,15 @@ class Model(object):
                 continue
 
             norms = torch.sum(torch.abs(current), dim=1).expand_as(current)
-            yield (current / norms).detach()
+            yield torch.nn.functional.pad(current / norms, pad=(1, 1, 1, 1), mode='replicate').detach()
 
     def patches_score(self, first, y, x, second, v, u):
         """Compute the match score of a patch in one image at (y,x) compared to the patch of second image at (v,u).
         """
         score = 0.0
         for j, i in [(-1,-1),(-1,0),(-1,+1),(0,-1),(0,0),(0,+1),(+1,-1),(+1,0),(+1,+1)]:
-            score += torch.sum((first.input[0,:,y+j,x+i] - second.repro[0,:,1+v+j,1+u+i]) ** 2.0) \
-                   + torch.sum((first.repro[0,:,y+j,x+i] - second.input[0,:,1+v+j,1+u+i]) ** 2.0)
+            score += torch.sum((first.input[0,:,1+y+j,1+x+i] - second.repro[0,:,1+v+j,1+u+i]) ** 2.0) \
+                   + torch.sum((first.repro[0,:,1+y+j,1+x+i] - second.input[0,:,1+v+j,1+u+i]) ** 2.0)
         return score.detach().data[0] # perf?
 
     def patches_initialize(self, first, second):
@@ -120,7 +121,7 @@ class Model(object):
                 for offset in [(0, -1 if even else +1), (-1 if even else +1, 0)]:
                     i1, i2 = indices[min(indices.size(0)-1, max(b+offset[0], 0)), min(indices.size(1)-1, max(a+offset[1], 0))]\
                                     - torch.from_numpy(np.array(offset, dtype=np.int32))
-                    i1, i2 = min(first.input.size(2)-2, max(i1, 1)), min(first.input.size(3)-2, max(i2, 1))
+                    i1, i2 = min(indices.size(0)-1, max(i1, 0)), min(indices.size(1)-1, max(i2, 0))
                     score = self.patches_score(first, i1, i2, second, b, a)
                     if score < first.scores[b,a]:
                         first.scores[b,a] = score
@@ -134,8 +135,8 @@ class Model(object):
             for a in range(indices.size(1)):
                 for radius in range(k+1, 0, -1):
                     w, i1, i2 = 2 ** (radius-1), *indices[b,a]
-                    i1 = min(first.input.size(2)-2, max(i1 + np.random.randint(-w, +w), 1))
-                    i2 = min(first.input.size(3)-2, max(i2 + np.random.randint(-w, +w), 1))
+                    i1 = min(indices.size(0)-1, max(i1 + np.random.randint(-w, +w), 0))
+                    i2 = min(indices.size(1)-1, max(i2 + np.random.randint(-w, +w), 0))
                     score = self.patches_score(first, i1, i2, second, b, a)
                     if score < first.scores[b,a]:
                         first.scores[b,a] = score
@@ -151,11 +152,11 @@ class Buffer(object):
     def __init__(self, features):
         self.input = features
         self.repro = features
-        self.output = None
+        self.origin = None
 
         indices = np.zeros((features.size(2) - 2, features.size(3) - 2, 2), dtype=np.int32)
-        indices[:,:,0] = np.random.randint(low=1, high=features.size(2)-1, size=indices.shape[:2])
-        indices[:,:,1] = np.random.randint(low=1, high=features.size(3)-1, size=indices.shape[:2])
+        indices[:,:,0] = np.random.randint(low=0, high=features.size(2)-2, size=indices.shape[:2])
+        indices[:,:,1] = np.random.randint(low=0, high=features.size(3)-2, size=indices.shape[:2])
         self.indices = torch.from_numpy(indices)
 
         scores = np.zeros((features.size(2) - 2, features.size(3) - 2), dtype=np.float32)
@@ -165,13 +166,22 @@ class Buffer(object):
         if buffer is None:
             return
 
-        import scipy.ndimage.interpolation
-        padded = np.pad(buffer.indices.numpy() * 2, ((1,1), (1,1), (0,0)), mode='edge')
+        padded = buffer.indices.numpy() * 2
         zoomed = scipy.ndimage.interpolation.zoom(padded, zoom=(2,2,1), order=0)
-        cropped = zoomed[1:-1,1:-1]
+        assert self.indices.size() == zoomed.shape
+        self.indices[:,:] = torch.from_numpy(zoomed)
 
-        assert self.indices.size() == cropped.shape
-        self.indices[:,:] = torch.from_numpy(cropped[:,:])
+        size = np.array(self.input.size(), dtype=np.int32) - [0, 0, 2, 2]
+        warped_features = np.zeros(size, dtype=np.float32)
+        for y in range(warped_features.shape[2]):
+            for x in range(warped_features.shape[3]):
+                v, u = zoomed[y,x]
+                warped_features[0,:,y,x] = self.input[0,:,v,u].data.numpy()
+
+        repro = torch.autograd.Variable(torch.from_numpy(warped_features))
+        repro = torch.nn.functional.pad(repro, pad=(1, 1, 1, 1), mode='replicate')
+        assert self.repro.size() == repro.size()
+        self.repro = repro
 
 
 class NeuralAnalogy(object):
@@ -198,24 +208,51 @@ class NeuralAnalogy(object):
         print('{}'.format(ansi.ENDC))
 
         first_previous, second_previous = None, None
-        for first, second in zip(first_buffers, second_buffers):
+        for i, (first, second) in enumerate(zip(first_buffers, second_buffers)):
             first.merge(first_previous)
-            second.merge(second_previous)
+            first.origin = first_image
 
-            self.match_patches(first, second)
+            second.merge(second_previous)
+            second.origin = second_image
+
+            self.compute_flow(first, second, layer=f'{i}.f')
+            # self.compute_output(first, second)
+
+            self.compute_flow(second, first, layer=f'{i}.s')
+            # self.compute_output(second, first)
             first_previous, second_previous = first, second
 
         return scipy.misc.toimage(first_image, cmin=0, cmax=255), scipy.misc.toimage(second_image, cmin=0, cmax=255)
 
-    def match_patches(self, first, second):
-        print('Patches initializing...')
+    def compute_flow(self, first, second, *, layer):
+        print('Computing warp via patch matching...')
         self.model.patches_initialize(first, second)
 
         for i in range(2):
-            print('Patches propagating...', first.scores.mean())
+            if first.scores.mean() == 0.0: break
+            print('  - Propagating best matches.', first.scores.mean())
             self.model.patches_propagate(first, second, i)
-            print('Patches searching...', first.scores.mean())
+            print('  - Searching better patches.', first.scores.mean())
             self.model.patches_search(first, second, 2)
+
+        padded = first.indices.numpy()
+        zoom = first.origin.shape[0] // padded.shape[0]
+        zoomed = scipy.ndimage.interpolation.zoom(padded * zoom, zoom=(zoom, zoom, 1), order=0)
+
+        field = np.zeros(first.origin.shape, dtype=np.float32)
+        field[:,:,0] = zoomed[:,:,0] * 255.0 / zoomed.shape[0]
+        field[:,:,2] = zoomed[:,:,1] * 255.0 / zoomed.shape[1]
+        scipy.misc.toimage(field.clip(0.0, 255.0), cmin=0, cmax=255).save(f'frames/{layer}_field.png')
+
+        warped_image = np.zeros(second.origin.shape, dtype=np.int32)
+        for y in range(warped_image.shape[0]):
+            for x in range(warped_image.shape[1]):
+                v, u = zoomed[y,x]
+                warped_image[y,x] = first.origin[v,u]
+        scipy.misc.toimage(warped_image, cmin=0, cmax=255).save(f'frames/{layer}_output.png')
+
+    def compute_output(self, first, second):
+        pass
 
 
 if __name__ == "__main__":
