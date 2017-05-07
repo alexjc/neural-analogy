@@ -91,56 +91,54 @@ class Model(object):
             current = self.vgg19.features[i].forward(current)
             if i not in layers:
                 continue
-
-            norms = torch.sum(torch.abs(current), dim=1).expand_as(current)
-            yield torch.nn.functional.pad(current / norms, pad=(1, 1, 1, 1), mode='replicate').detach()
+            yield torch.nn.functional.pad(current, pad=(1, 1, 1, 1), mode='replicate').detach()
 
     def patches_score(self, first, y, x, second, v, u):
         """Compute the match score of a patch in one image at (y,x) compared to the patch of second image at (v,u).
         """
         score = 0.0
         for j, i in [(-1,-1),(-1,0),(-1,+1),(0,-1),(0,0),(0,+1),(+1,-1),(+1,0),(+1,+1)]:
-            score += torch.sum((first.input[0,:,1+y+j,1+x+i] - second.repro[0,:,1+v+j,1+u+i]) ** 2.0) \
-                   + torch.sum((first.repro[0,:,1+y+j,1+x+i] - second.input[0,:,1+v+j,1+u+i]) ** 2.0)
+            score += torch.sum((first.repro[0,:,1+y+j,1+x+i] - second.input[0,:,1+v+j,1+u+i]) ** 2.0) \
+                   + torch.sum((first.input[0,:,1+y+j,1+x+i] - second.repro[0,:,1+v+j,1+u+i]) ** 2.0)
         return score.detach().data[0] # perf?
 
     def patches_initialize(self, first, second):
         """Compute the scores for matching all patches based on the pre-initialized indices.
         """
-        for v in range(first.indices.size(0)):
-            for u in range(first.indices.size(1)):
-                y, x = first.indices[v,u]
-                first.scores[v,u] = self.patches_score(first, y, x, second, v, u)
+        for y in range(first.indices.size(0)):
+            for x in range(first.indices.size(1)):
+                v, u = first.indices[y,x]
+                first.scores[y,x] = self.patches_score(first, y, x, second, v, u)
 
     def patches_propagate(self, first, second, i):
         """Propagate all indices either towards the top-left or bottom-right, and update patch scores that are better.
         """
         even, indices = bool((i%2)==0), first.indices
-        for b in range(0, indices.size(0)) if even else range(indices.size(0)-1, -1, -1):
-            for a in range(0, indices.size(1)) if even else range(indices.size(1)-1, -1, -1):
+        for y in range(0, indices.size(0)) if even else range(indices.size(0)-1, -1, -1):
+            for x in range(0, indices.size(1)) if even else range(indices.size(1)-1, -1, -1):
                 for offset in [(0, -1 if even else +1), (-1 if even else +1, 0)]:
-                    i1, i2 = indices[min(indices.size(0)-1, max(b+offset[0], 0)), min(indices.size(1)-1, max(a+offset[1], 0))]\
+                    v, u = indices[min(indices.size(0)-1, max(y+offset[0], 0)), min(indices.size(1)-1, max(x+offset[1], 0))]\
                                     - torch.from_numpy(np.array(offset, dtype=np.int32))
-                    i1, i2 = min(indices.size(0)-1, max(i1, 0)), min(indices.size(1)-1, max(i2, 0))
-                    score = self.patches_score(first, i1, i2, second, b, a)
-                    if score < first.scores[b,a]:
-                        first.scores[b,a] = score
-                        indices[b,a] = torch.from_numpy(np.array([i1, i2], dtype=np.int32))
+                    v, u = min(indices.size(0)-1, max(v, 0)), min(indices.size(1)-1, max(u, 0))
+                    score = self.patches_score(first, y, x, second, v, u)
+                    if score < first.scores[y,x]:
+                        first.scores[y,x] = score
+                        indices[y,x] = torch.from_numpy(np.array([v, u], dtype=np.int32))
 
-    def patches_search(self, first, second, k):
+    def patches_search(self, first, second, times, radius):
         """Iteratively search out from each index pair, updating the patches found that match better.
         """
-        indices = first.indices
-        for b in range(indices.size(0)):
-            for a in range(indices.size(1)):
-                for radius in range(k+1, 0, -1):
-                    w, i1, i2 = 2 ** (radius-1), *indices[b,a]
-                    i1 = min(indices.size(0)-1, max(i1 + np.random.randint(-w, +w), 0))
-                    i2 = min(indices.size(1)-1, max(i2 + np.random.randint(-w, +w), 0))
-                    score = self.patches_score(first, i1, i2, second, b, a)
-                    if score < first.scores[b,a]:
-                        first.scores[b,a] = score
-                        indices[b,a] = torch.from_numpy(np.array([i1, i2], dtype=np.int32))
+        indices, scores = first.indices, first.scores
+        for y in range(indices.size(0)):
+            for x in range(indices.size(1)):
+                for _ in range(times):
+                    v, u = first.indices[y,x]
+                    v = min(indices.size(0)-1, max(v + np.random.randint(-radius, +radius), 0))
+                    u = min(indices.size(1)-1, max(u + np.random.randint(-radius, +radius), 0))
+                    score = self.patches_score(first, y, x, second, v, u)
+                    if score < scores[y,x]:
+                        scores[y,x] = score
+                        indices[y,x] = torch.from_numpy(np.array([v, u], dtype=np.int32))
 
 
 #======================================================================================================================
@@ -149,10 +147,16 @@ class Model(object):
 
 class Buffer(object):
 
-    def __init__(self, features):
-        self.input = features
-        self.repro = features
+    def __init__(self, features, *, weight, radius):
+        norms = torch.sum(torch.abs(features), dim=1)
+        self.input = features / norms.expand_as(features)
+        self.repro = features / norms.expand_as(features)
         self.origin = None
+
+        norms = (norms - norms.mean().expand_as(norms)) / norms.std().expand_as(norms)
+        self.weights = weight / (1.0 + torch.exp(-10*(norms-0.5)))
+        self.weight = weight
+        self.radius = radius
 
         indices = np.zeros((features.size(2) - 2, features.size(3) - 2, 2), dtype=np.int32)
         indices[:,:,0] = np.random.randint(low=0, high=features.size(2)-2, size=indices.shape[:2])
@@ -162,11 +166,11 @@ class Buffer(object):
         scores = np.zeros((features.size(2) - 2, features.size(3) - 2), dtype=np.float32)
         self.scores = torch.from_numpy(scores)
     
-    def merge(self, buffer):
-        if buffer is None:
+    def merge(self, parent, other):
+        if parent is None:
             return
 
-        padded = buffer.indices.numpy() * 2
+        padded = parent.indices.numpy() * 2
         zoomed = scipy.ndimage.interpolation.zoom(padded, zoom=(2,2,1), order=0)
         assert self.indices.size() == zoomed.shape
         self.indices[:,:] = torch.from_numpy(zoomed)
@@ -176,12 +180,14 @@ class Buffer(object):
         for y in range(warped_features.shape[2]):
             for x in range(warped_features.shape[3]):
                 v, u = zoomed[y,x]
-                warped_features[0,:,y,x] = self.input[0,:,v,u].data.numpy()
+                warped_features[0,:,y,x] = other.input[0,:,1+v,1+u].data.numpy()
 
         repro = torch.autograd.Variable(torch.from_numpy(warped_features))
         repro = torch.nn.functional.pad(repro, pad=(1, 1, 1, 1), mode='replicate')
         assert self.repro.size() == repro.size()
-        self.repro = repro
+
+        w = self.weights.expand_as(self.repro)
+        self.repro = self.repro * w + (1.0 - w) * repro
 
 
 class NeuralAnalogy(object):
@@ -191,11 +197,13 @@ class NeuralAnalogy(object):
 
     def extract(self, image, label):
         features, output, total = self.model.extract(image), [], 0
+        weights = [0.1, 0.6, 0.7, 0.8, 1.0]
+        radii = [4, 4, 6, 6, 10]
         for i, feature in enumerate(features):
             shape, memory = tuple(feature.size()[1:]), (feature.numel() * feature.element_size()) // 1024
             print(f'\r  - Layer {i} with {memory:,}kb features as {shape} array.', end='')
             total += memory
-            output.append(Buffer(feature))
+            output.append(Buffer(feature, weight=weights[i], radius=radii[i]))
         print(f'\r  - Extracted {len(output)} layers using total {total:,}kb memory from {label} image.')
         return reversed(output)
 
@@ -209,10 +217,10 @@ class NeuralAnalogy(object):
 
         first_previous, second_previous = None, None
         for i, (first, second) in enumerate(zip(first_buffers, second_buffers)):
-            first.merge(first_previous)
+            first.merge(first_previous, second)
             first.origin = first_image
 
-            second.merge(second_previous)
+            second.merge(second_previous, first)
             second.origin = second_image
 
             self.compute_flow(first, second, layer=f'{i}.f')
@@ -228,31 +236,48 @@ class NeuralAnalogy(object):
         print('Computing warp via patch matching...')
         self.model.patches_initialize(first, second)
 
-        for i in range(2):
-            if first.scores.mean() == 0.0: break
-            print('  - Propagating best matches.', first.scores.mean())
-            self.model.patches_propagate(first, second, i)
-            print('  - Searching better patches.', first.scores.mean())
-            self.model.patches_search(first, second, 2)
+        last = 1.0
+        for i in range(16):
+            score = first.scores.mean()
+            if score == 0.0 or score == last or (score/last) > 0.99:
+                break
 
-        padded = first.indices.numpy()
-        zoom = first.origin.shape[0] // padded.shape[0]
-        zoomed = scipy.ndimage.interpolation.zoom(padded * zoom, zoom=(zoom, zoom, 1), order=0)
+            if i % 2 == 0:
+                print('  - Propagating best matches.', int(100 * score / last), score)
+                self.model.patches_propagate(first, second, i // 2)
+            if i % 2 == 1:
+                print(f'  - Searching in radius {first.radius}.', int(100 * score / last), score)
+                self.model.patches_search(first, second, times=4, radius=first.radius)
+            last = score
 
-        field = np.zeros(first.origin.shape, dtype=np.float32)
-        field[:,:,0] = zoomed[:,:,0] * 255.0 / zoomed.shape[0]
-        field[:,:,2] = zoomed[:,:,1] * 255.0 / zoomed.shape[1]
-        scipy.misc.toimage(field.clip(0.0, 255.0), cmin=0, cmax=255).save(f'frames/{layer}_field.png')
+        print('  - Warping resulting image.', first.scores.mean())
+        indices = first.indices.numpy()
+        zoom = first.origin.shape[0] // indices.shape[0]
 
-        warped_image = np.zeros(second.origin.shape, dtype=np.int32)
+        zoomed_field = np.zeros(first.origin.shape[:2]+(3,), dtype=np.float32)
+        warped_image = np.zeros(first.origin.shape[:2]+(4,), dtype=np.float32)
+        weight_array = np.zeros(first.origin.shape[:2], dtype=np.float32)
+        scores_array = np.zeros(first.origin.shape[:2], dtype=np.float32)
+
+        weights = first.weights.data.numpy()
+        scores = first.scores.numpy()
+
         for y in range(warped_image.shape[0]):
             for x in range(warped_image.shape[1]):
-                v, u = zoomed[y,x]
-                warped_image[y,x] = first.origin[v,u]
-        scipy.misc.toimage(warped_image, cmin=0, cmax=255).save(f'frames/{layer}_output.png')
+                v, u = indices[y // zoom, x // zoom]
+                warped_image[y,x,:3] = second.origin[v * zoom + y % zoom, u * zoom + x % zoom]
+                warped_image[y,x,3] = 192 if (zoom>1 and ((x//zoom) % 2) ^ ((y//zoom) % 2)) else 256
 
-    def compute_output(self, first, second):
-        pass
+                zoomed_field[y,x,0] = indices[y // zoom, x // zoom, 0] * 255.0 / indices.shape[0]
+                zoomed_field[y,x,2] = indices[y // zoom, x // zoom, 1] * 255.0 / indices.shape[1]
+
+                weight_array[y,x] = weights[0,:,1+y // zoom, 1+x // zoom]
+                scores_array[y,x] = scores[y // zoom, x // zoom]
+
+        scipy.misc.toimage(zoomed_field.clip(0.0, 255.0), cmin=0, cmax=255).save(f'frames/{layer}_field.png')
+        scipy.misc.toimage(warped_image.clip(0.0, 255.0), cmin=0, cmax=255).save(f'frames/{layer}_output.png')
+        scipy.misc.toimage(weight_array * 255.0, cmin=0, cmax=255).save(f'frames/{layer}_weight.png')
+        scipy.misc.toimage((scores_array - scores_array.min()) * 255.0 / (scores_array.max() - scores_array.min()), cmin=0, cmax=255).save(f'frames/{layer}_scores.png')
 
 
 if __name__ == "__main__":
