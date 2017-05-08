@@ -1,0 +1,7 @@
+.vscode
+pyvenv
+frames
+
+*.png
+*.jpg
+*.pth
