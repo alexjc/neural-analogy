@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""                          _                     _                    
-  _ __   ___ _   _ _ __ __ _| |   __ _ _ __   __ _| | ___   __ _ _   _  
- | '_ \ / _ \ | | | '__/ _` | |  / _` | '_ \ / _` | |/ _ \ / _` | | | | 
- | | | |  __/ |_| | | | (_| | | | (_| | | | | (_| | | (_) | (_| | |_| | 
- |_| |_|\___|\__,_|_|  \__,_|_|  \__,_|_| |_|\__,_|_|\___/ \__, |\__, | 
-                                                           |___/ |___/  
+"""                          _                     _
+  _ __   ___ _   _ _ __ __ _| |   __ _ _ __   __ _| | ___   __ _ _   _
+ | '_ \ / _ \ | | | '__/ _` | |  / _` | '_ \ / _` | |/ _ \ / _` | | | |
+ | | | |  __/ |_| | | | (_| | | | (_| | | | | (_| | | (_) | (_| | |_| |
+ |_| |_|\___|\__,_|_|  \__,_|_|  \__,_|_| |_|\__,_|_|\___/ \__, |\__, |
+                                                           |___/ |___/
 """
 #
 # Copyright (c) 2017, creative.ai
@@ -30,15 +30,6 @@ import sklearn.feature_extraction
 
 # Numeric Computing (GPU)
 import torch, torch.autograd, torchvision.models, torchvision.transforms
-
-
-# Configure all options to be passed in from the command-line.
-parser = argparse.ArgumentParser(description='Transform one image into another and back again by computing analogies.',
-                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-add_arg = parser.add_argument
-add_arg('first',                type=str,                help='First input image, usually called A.')
-add_arg('second',               type=str,                help='Second input image, usually named B’.')
-args = parser.parse_args()
 
 
 #----------------------------------------------------------------------------------------------------------------------
@@ -91,8 +82,7 @@ class Model(object):
             torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
 
         data = transform(image).cuda()
-        variable = torch.autograd.Variable(data).view(1, -1, image.shape[0], image.shape[1])
-        current, output = variable, []
+        current = torch.autograd.Variable(data).view(1, -1, image.shape[0], image.shape[1])
         for i in range(max(layers)+1):
             current = self.vgg19.features[i].forward(current)
             if i in layers:
@@ -109,23 +99,23 @@ class Model(object):
         """
         for y in range(first.indices.shape[0]):
             for x in range(first.indices.shape[1]):
-                v, u = first.indices[y,x]
-                first.scores[y,x] = self.patches_score(first, y, x, second, v, u, padding)
+                v, u = first.indices[y, x]
+                first.scores[y, x] = self.patches_score(first, y, x, second, v, u, padding)
 
     def patches_propagate(self, first, second, i, padding=1):
         """Propagate all indices either towards the top-left or bottom-right, and update patch scores that are better.
         """
-        even, indices, scores = bool((i%2)==0), first.indices, first.scores
+        even, indices, scores = bool((i%2) == 0), first.indices, first.scores
         for y in range(0, indices.shape[0]) if even else range(indices.shape[0]-1, -1, -1):
             for x in range(0, indices.shape[1]) if even else range(indices.shape[1]-1, -1, -1):
                 for offset in [(0, -1 if even else +1), (-1 if even else +1, 0)]:
-                    v, u = indices[min(indices.shape[0]-1, max(y+offset[0], 0)), min(indices.shape[1]-1, max(x+offset[1], 0))] \
-                                    - np.array(offset, dtype=np.int32)
+                    v, u = indices[min(indices.shape[0] - 1, max(y + offset[0], 0)),
+                                   min(indices.shape[1] - 1, max(x + offset[1], 0))] - np.array(offset, dtype=np.int32)
                     v, u = min(indices.shape[0]-1, max(v, 0)), min(indices.shape[1]-1, max(u, 0))
                     score = self.patches_score(first, y, x, second, v, u, padding)
-                    if score > scores[y,x]:
-                        scores[y,x] = score
-                        indices[y,x] = [v, u]
+                    if score > scores[y, x]:
+                        scores[y, x] = score
+                        indices[y, x] = [v, u]
 
     def patches_search(self, first, second, times, radius, padding=1):
         """Iteratively search out from each index pair, updating the patches found that match better.
@@ -135,7 +125,7 @@ class Model(object):
             for x in range(indices.shape[1]):
                 for _ in range(times):
                     if radius > 0:
-                        v, u = first.indices[y,x]
+                        v, u = first.indices[y, x]
                         v = min(indices.shape[0]-1, max(v + np.random.randint(-radius, +radius), 0))
                         u = min(indices.shape[1]-1, max(u + np.random.randint(-radius, +radius), 0))
                     else:
@@ -143,9 +133,9 @@ class Model(object):
                         u = np.random.randint(0, indices.shape[1])
 
                     score = self.patches_score(first, y, x, second, v, u, padding)
-                    if score > scores[y,x]:
-                        scores[y,x] = score
-                        indices[y,x] = [v, u]
+                    if score > scores[y, x]:
+                        scores[y, x] = score
+                        indices[y, x] = [v, u]
 
 
 #======================================================================================================================
@@ -168,13 +158,14 @@ class Buffer(object):
         self.weights = weight / (1.0 + torch.exp(-10*(norms-0.5)))
         self.weight = weight
         self.radius = radius
-        self.padding, p = padding, padding * 2
+        self.padding = padding
 
         indices = np.zeros((features.size(2), features.size(3), 2), dtype=np.int32)
 
         # 1) Identity coordinates, should be easy to reproduce this on small images.
-        indices[:, :, 0] = np.array([y for y, _ in itertools.product(range(features.size(2)), range(features.size(3)))]).reshape(indices.shape[:2])
-        indices[:, :, 1] = np.array([x for _, x in itertools.product(range(features.size(2)), range(features.size(3)))]).reshape(indices.shape[:2])
+        coords = list(itertools.product(range(features.size(2)), range(features.size(3))))
+        indices[:, :, 0] = np.array([y for y, _ in coords]).reshape(indices.shape[:2])
+        indices[:, :, 1] = np.array([x for _, x in coords]).reshape(indices.shape[:2])
 
         # 2) Random initialization, this helps search exhaustively at top level.
         # indices[:, :, 0] = np.random.randint(low=0, high=features.size(2), size=indices.shape[:2])
@@ -196,19 +187,18 @@ class NeuralAnalogy(object):
         padding = [2, 2, 1, 1, 1]
         for i, feature in enumerate(features):
             shape, memory = tuple(feature.size()[1:]), (feature.numel() * feature.element_size()) // 1024
-            p = padding[i]
-            print(f'  - Layer {i} with {memory:,}kb features as {shape} array, padding {p}.    ', end='\r')
+            print(f'  - Layer {i} with {memory:,}kb features as {shape} array, padding {padding[i]}.    ', end='\r')
             total += memory
 
-            patches = self.extract_patches(feature.data.cpu().numpy(), padding=p)
-            output.append(Buffer(feature, patches, weight=weights[i], radius=radii[i], padding=p))
+            patches = self.extract_patches(feature.data.cpu().numpy(), padding=padding[i])
+            output.append(Buffer(feature, patches, weight=weights[i], radius=radii[i], padding=padding[i]))
 
         print(f'  - Extracted {len(output)} layers using total {total:,}kb memory from {label} image.')
         return reversed(output)
 
     def extract_patches(self, feature, padding):
         p = padding
-        padded = np.pad(feature[0], ((0, 0), (p, p), (p, p)), mode='edge').transpose((1,2,0))
+        padded = np.pad(feature[0], ((0, 0), (p, p), (p, p)), mode='edge').transpose((1, 2, 0))
         patches = sklearn.feature_extraction.image.extract_patches_2d(padded, patch_size=(p*2+1, p*2+1))
         return patches.reshape(feature.shape[2:]+(-1,))
 
@@ -244,8 +234,8 @@ class NeuralAnalogy(object):
         for y in range(warped_image.shape[0]):
             for x in range(warped_image.shape[1]):
                 v, u = indices[y // zoom, x // zoom]
-                warped_image[y,x,:3] = second.origin[v * zoom + y % zoom, u * zoom + x % zoom]
-                warped_image[y,x,3] = 192 if (zoom>1 and ((x//zoom) % 2) ^ ((y//zoom) % 2)) else 256
+                warped_image[y, x, :3] = second.origin[v * zoom + y % zoom, u * zoom + x % zoom]
+                warped_image[y, x, 3] = 192 if (zoom > 1 and ((x//zoom) % 2) ^ ((y//zoom) % 2)) else 256
         scipy.misc.toimage(warped_image.clip(0.0, 255.0), cmin=0, cmax=255).save(f'frames/{layer}_scaled.png')
 
         print('Computing warp via patch matching...')
@@ -280,14 +270,14 @@ class NeuralAnalogy(object):
         for y in range(warped_image.shape[0]):
             for x in range(warped_image.shape[1]):
                 v, u = indices[y // zoom, x // zoom]
-                warped_image[y,x,:3] = second.origin[v * zoom + y % zoom, u * zoom + x % zoom]
-                warped_image[y,x,3] = 192 if (zoom>1 and ((x//zoom) % 2) ^ ((y//zoom) % 2)) else 256
+                warped_image[y, x, :3] = second.origin[v * zoom + y % zoom, u * zoom + x % zoom]
+                warped_image[y, x, 3] = 192 if (zoom > 1 and ((x//zoom) % 2) ^ ((y//zoom) % 2)) else 256
 
-                zoomed_field[y,x,0] = indices[y // zoom, x // zoom, 0] * 255.0 / indices.shape[0]
-                zoomed_field[y,x,2] = indices[y // zoom, x // zoom, 1] * 255.0 / indices.shape[1]
+                zoomed_field[y, x, 0] = indices[y // zoom, x // zoom, 0] * 255.0 / indices.shape[0]
+                zoomed_field[y, x, 2] = indices[y // zoom, x // zoom, 1] * 255.0 / indices.shape[1]
 
-                weight_array[y,x] = weights[0,:,y // zoom, x // zoom]
-                scores_array[y,x] = scores[y // zoom, x // zoom]
+                weight_array[y, x] = weights[0, :, y // zoom, x // zoom]
+                scores_array[y, x] = scores[y // zoom, x // zoom]
 
         scipy.misc.toimage(zoomed_field.clip(0.0, 255.0), cmin=0, cmax=255).save(f'frames/{layer}_field.png')
         scipy.misc.toimage(warped_image.clip(0.0, 255.0), cmin=0, cmax=255).save(f'frames/{layer}_output.png')
@@ -300,16 +290,16 @@ class NeuralAnalogy(object):
             return
 
         indices, p = parent.indices * 2, this.padding
-        zoomed = scipy.ndimage.interpolation.zoom(indices, zoom=(2,2,1), order=0)
+        zoomed = scipy.ndimage.interpolation.zoom(indices, zoom=(2, 2, 1), order=0)
         assert this.indices.shape == zoomed.shape
-        this.indices[:,:] = zoomed
+        this.indices[:, :] = zoomed
 
         features_other = other.features_orign.data.cpu().numpy()
         features_warpd = np.zeros(this.features_orign.size(), dtype=np.float32)
         for y in range(features_warpd.shape[2]):
             for x in range(features_warpd.shape[3]):
-                v, u = zoomed[y,x]
-                features_warpd[0,:,y,x] = features_other[0,:,v,u]
+                v, u = zoomed[y, x]
+                features_warpd[0, :, y, x] = features_other[0, :, v, u]
 
         w = this.weights.data.cpu().numpy()
         features_repro = this.features_orign.data.cpu().numpy() * w + (1.0 - w) * features_warpd
@@ -318,12 +308,27 @@ class NeuralAnalogy(object):
         this.patches_repro = torch.from_numpy(patches_repro / patches_norm).cuda()
 
 
-if __name__ == "__main__":
+def main():
+    # Configure all options to be passed in from the command-line.
+    parser = argparse.ArgumentParser(description='Transform one image into another and back again by computing analogies.',
+                                    formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    add_arg = parser.add_argument
+    add_arg('first',                type=str,                help='First input image, usually called A.')
+    add_arg('second',               type=str,                help='Second input image, usually named B’.')
+    args = parser.parse_args()
+
+    # Load the images from disk, always converting to 3 channels.
     first_input = scipy.ndimage.imread(args.first, mode='RGB')
     second_input = scipy.ndimage.imread(args.second, mode='RGB')
 
+    # Run the main algorithm to generate the output images.
     analogy = NeuralAnalogy()
     first_output, second_output = analogy.process(first_input, second_input)
 
+    # Save the results to disk with a specific suffix.
     first_output.save(os.path.splitext(args.first)[0]+'_na.png')
     second_output.save(os.path.splitext(args.second)[0]+'_na.png')
+
+
+if __name__ == "__main__":
+    main()
