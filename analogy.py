@@ -97,45 +97,53 @@ class Model(object):
     def patches_initialize(self, first, second, padding=1):
         """Compute the scores for matching all patches based on the pre-initialized indices.
         """
-        for y in range(first.indices.shape[0]):
-            for x in range(first.indices.shape[1]):
+        first_shape, second_shape = first.indices.shape, second.indices.shape
+        for y in range(first_shape[0]):
+            for x in range(first_shape[1]):
                 v, u = first.indices[y, x]
+                v, u = min(second_shape[0]-1, max(v, 0)), min(second_shape[1]-1, max(u, 0))
                 first.scores[y, x] = self.patches_score(first, y, x, second, v, u, padding)
 
     def patches_propagate(self, first, second, i, padding=1):
         """Propagate all indices either towards the top-left or bottom-right, and update patch scores that are better.
         """
-        even, indices, scores = bool((i%2) == 0), first.indices, first.scores
-        for y in range(0, indices.shape[0]) if even else range(indices.shape[0]-1, -1, -1):
-            for x in range(0, indices.shape[1]) if even else range(indices.shape[1]-1, -1, -1):
+        even, first_shape, second_shape = bool((i%2) == 0), first.indices.shape, second.indices.shape
+        for y in range(0, first_shape[0]) if even else range(first_shape[0] - 1, -1, -1):
+            for x in range(0, first_shape[1]) if even else range(first_shape[1] - 1, -1, -1):
                 for offset in [(0, -1 if even else +1), (-1 if even else +1, 0)]:
-                    v, u = indices[min(indices.shape[0] - 1, max(y + offset[0], 0)),
-                                   min(indices.shape[1] - 1, max(x + offset[1], 0))] - np.array(offset, dtype=np.int32)
-                    v, u = min(indices.shape[0]-1, max(v, 0)), min(indices.shape[1]-1, max(u, 0))
+                    v, u = first.indices[min(first_shape[0] - 1, max(y + offset[0], 0)),
+                                         min(first_shape[1] - 1, max(x + offset[1], 0))] - np.array(offset, dtype=np.int32)
+                    v, u = min(second_shape[0] - 1, max(v, 0)), min(second_shape[1] - 1, max(u, 0))
                     score = self.patches_score(first, y, x, second, v, u, padding)
-                    if score > scores[y, x]:
-                        scores[y, x] = score
-                        indices[y, x] = [v, u]
+                    if score > first.scores[y, x]:
+                        first.scores[y, x] = score
+                        first.indices[y, x] = [v, u]
+                    # if score > second.scores[v, u]:
+                    #     second.scores[v, u] = score
+                    #     second.indices[v, u] = [y, x]
 
     def patches_search(self, first, second, times, radius, padding=1):
         """Iteratively search out from each index pair, updating the patches found that match better.
         """
-        indices, scores = first.indices, first.scores
-        for y in range(indices.shape[0]):
-            for x in range(indices.shape[1]):
+        first_shape, second_shape = first.indices.shape, second.indices.shape
+        for y in range(first_shape[0]):
+            for x in range(first_shape[1]):
                 for _ in range(times):
                     if radius > 0:
                         v, u = first.indices[y, x]
-                        v = min(indices.shape[0]-1, max(v + np.random.randint(-radius, +radius), 0))
-                        u = min(indices.shape[1]-1, max(u + np.random.randint(-radius, +radius), 0))
+                        v = min(second_shape[0] - 1, max(v + np.random.randint(-radius, radius+1), 0))
+                        u = min(second_shape[1] - 1, max(u + np.random.randint(-radius, radius+1), 0))
                     else:
-                        v = np.random.randint(0, indices.shape[0])
-                        u = np.random.randint(0, indices.shape[1])
+                        v = np.random.randint(0, second_shape[0])
+                        u = np.random.randint(0, second_shape[1])
 
                     score = self.patches_score(first, y, x, second, v, u, padding)
-                    if score > scores[y, x]:
-                        scores[y, x] = score
-                        indices[y, x] = [v, u]
+                    if score > first.scores[y, x]:
+                        first.scores[y, x] = score
+                        first.indices[y, x] = [v, u]
+                    # if score > second.scores[v, u]:
+                    #     second.scores[v, u] = score
+                    #     second.indices[v, u] = [y, x]
 
 
 #======================================================================================================================
@@ -149,6 +157,8 @@ class Buffer(object):
         self.features_orign = features
 
         patches_norm = np.sqrt(np.sum(patches ** 2.0, axis=(2,), keepdims=True))
+        # patches_norm = np.sum(np.abs(patches), axis=(2,), keepdims=True)
+        # patches_norm = 1.0
         self.patches_orign = torch.from_numpy(patches / patches_norm).cuda()
         self.patches_repro = self.patches_orign
 
@@ -161,16 +171,6 @@ class Buffer(object):
         self.padding = padding
 
         indices = np.zeros((features.size(2), features.size(3), 2), dtype=np.int32)
-
-        # 1) Identity coordinates, should be easy to reproduce this on small images.
-        coords = list(itertools.product(range(features.size(2)), range(features.size(3))))
-        indices[:, :, 0] = np.array([y for y, _ in coords]).reshape(indices.shape[:2])
-        indices[:, :, 1] = np.array([x for _, x in coords]).reshape(indices.shape[:2])
-
-        # 2) Random initialization, this helps search exhaustively at top level.
-        # indices[:, :, 0] = np.random.randint(low=0, high=features.size(2), size=indices.shape[:2])
-        # indices[:, :, 1] = np.random.randint(low=0, high=features.size(3), size=indices.shape[:2])
-
         self.indices = indices
         self.scores = np.zeros((features.size(2), features.size(3)), dtype=np.float32)
 
@@ -197,10 +197,33 @@ class NeuralAnalogy(object):
         return reversed(output)
 
     def extract_patches(self, feature, padding):
+        # feature_norm = np.sqrt(np.sum(feature ** 2.0, axis=(1,), keepdims=True))
+        # feature = feature / feature_norm
+
         p = padding
-        padded = np.pad(feature[0], ((0, 0), (p, p), (p, p)), mode='edge').transpose((1, 2, 0))
+        padded = np.pad(feature[0].transpose((1, 2, 0)), ((p, p), (p, p), (0, 0)), mode='edge')
         patches = sklearn.feature_extraction.image.extract_patches_2d(padded, patch_size=(p*2+1, p*2+1))
-        return patches.reshape(feature.shape[2:]+(-1,))
+        patches = patches.reshape(feature.shape[2:]+(-1,)).astype(np.float32)
+        return patches
+
+    def reconstruct_patches(self, patches, padding):
+        p = padding
+        res = (patches.shape[0]+p*2, patches.shape[1]+p*2)
+        patches = patches.reshape((np.product(patches.shape[:2]), p*2+1, p*2+1, -1))
+        result = sklearn.feature_extraction.image.reconstruct_from_patches_2d(patches, (res)+(patches.shape[-1],))
+        result = result[p:-p,p:-p].transpose((2,0,1))[np.newaxis]
+        return result
+
+    def warp_features(self, array, indices, padding):
+        patches = self.extract_patches(array, padding)
+        patches_warpd = np.zeros(indices.shape[:2]+patches.shape[2:], dtype=np.float32)
+        # array_warpd = np.zeros(array.shape, dtype=np.float32)
+        for y in range(indices.shape[0]):
+            for x in range(indices.shape[1]):
+                v, u = indices[y, x]
+                patches_warpd[y, x] = patches[v, u]
+                # array_warpd[0, :, y, x] = array[0, :, v, u]
+        return self.reconstruct_patches(patches_warpd, padding)
 
     def process(self, first_image, second_image):
         print('\n{}Processing the image analogies specified on the command-line.{}'\
@@ -218,16 +241,16 @@ class NeuralAnalogy(object):
             self.merge_flow(second, second_previous, first)
             second.origin = second_image
 
-            self.compute_flow(first, second, layer=f'{i}.f')
-            # self.compute_output(first, second)
-
-            self.compute_flow(second, first, layer=f'{i}.s')
-            # self.compute_output(second, first)
+            print(16-i*4)
+            for _ in range(16-i*4):
+                self.compute_flow(first, second, layer=f'{i}.f')
+                self.compute_flow(second, first, layer=f'{i}.s')
             first_previous, second_previous = first, second
 
         return scipy.misc.toimage(first_image, cmin=0, cmax=255), scipy.misc.toimage(second_image, cmin=0, cmax=255)
 
     def compute_flow(self, first, second, *, layer):
+        """
         indices = first.indices
         zoom = first.origin.shape[0] // indices.shape[0]
         warped_image = np.zeros(first.origin.shape[:2]+(4,), dtype=np.float32)
@@ -237,12 +260,14 @@ class NeuralAnalogy(object):
                 warped_image[y, x, :3] = second.origin[v * zoom + y % zoom, u * zoom + x % zoom]
                 warped_image[y, x, 3] = 192 if (zoom > 1 and ((x//zoom) % 2) ^ ((y//zoom) % 2)) else 256
         scipy.misc.toimage(warped_image.clip(0.0, 255.0), cmin=0, cmax=255).save(f'frames/{layer}_scaled.png')
+        """
 
         print('Computing warp via patch matching...')
         self.model.patches_initialize(first, second, padding=first.padding)
+        score = first.scores.mean()
 
-        score = 0.0
-        for i in range(32):
+        print('  - Initialized with score', score)
+        for i in range(4):
             last, start = score, time.time()
             if i % 2 == 0:
                 self.model.patches_propagate(first, second, i // 2, padding=first.padding)
@@ -252,7 +277,7 @@ class NeuralAnalogy(object):
                 self.model.patches_search(first, second, times=r//2, radius=first.radius, padding=first.padding)
                 print(f'  - Searching radius={first.radius} times={r//2}.', end='')
 
-            score = first.scores.mean() * 0.5 + 0.5 * score
+            score = first.scores.mean() * 0.8 + 0.2 * score
             progress, elapsed = 100.0 * math.pow(last / score, 50.0), time.time() - start
             print(f' score={score} progress={progress:3.1f}% elapsed={elapsed}s')
 
@@ -270,6 +295,7 @@ class NeuralAnalogy(object):
         for y in range(warped_image.shape[0]):
             for x in range(warped_image.shape[1]):
                 v, u = indices[y // zoom, x // zoom]
+                # warped_image[y, x, :3] = second.origin[v * zoom, u * zoom]
                 warped_image[y, x, :3] = second.origin[v * zoom + y % zoom, u * zoom + x % zoom]
                 warped_image[y, x, 3] = 192 if (zoom > 1 and ((x//zoom) % 2) ^ ((y//zoom) % 2)) else 256
 
@@ -287,6 +313,13 @@ class NeuralAnalogy(object):
 
     def merge_flow(self, this, parent, other):
         if parent is None:
+            # 1) Random search, this happens immediately after initalization anyway.
+            # this.indices[:, :, 0] = np.random.randint(low=0, high=other.indices.shape[0], size=this.indices.shape[:2])
+            # this.indices[:, :, 1] = np.random.randint(low=0, high=other.indices.shape[1], size=this.indices.shape[:2])
+
+            # 2) Identity grid, this is harder to reproduce with random search.
+            this.indices[:, :, 0] = np.array([(y*other.indices.shape[0])//this.indices.shape[0] for y in range(this.indices.shape[0])], dtype=np.int32).reshape((-1, 1))
+            this.indices[:, :, 1] = np.array([(x*other.indices.shape[1])//this.indices.shape[1] for x in range(this.indices.shape[1])], dtype=np.int32).reshape((1, -1))
             return
 
         indices, p = parent.indices * 2, this.padding
@@ -295,16 +328,15 @@ class NeuralAnalogy(object):
         this.indices[:, :] = zoomed
 
         features_other = other.features_orign.data.cpu().numpy()
-        features_warpd = np.zeros(this.features_orign.size(), dtype=np.float32)
-        for y in range(features_warpd.shape[2]):
-            for x in range(features_warpd.shape[3]):
-                v, u = zoomed[y, x]
-                features_warpd[0, :, y, x] = features_other[0, :, v, u]
+        features_warpd = self.warp_features(features_other, zoomed, p)
 
         w = this.weights.data.cpu().numpy()
-        features_repro = this.features_orign.data.cpu().numpy() * w + (1.0 - w) * features_warpd
+        f = this.features_orign.data.cpu().numpy()
+        features_repro = f * w + (1.0 - w) * features_warpd
         patches_repro = self.extract_patches(features_repro, padding=p)
         patches_norm = np.sqrt(np.sum(patches_repro ** 2.0, axis=(2,), keepdims=True))
+        # patches_norm = np.sum(np.abs(patches_repro), axis=(2,), keepdims=True)
+        # patches_norm = 1.0
         this.patches_repro = torch.from_numpy(patches_repro / patches_norm).cuda()
 
 
