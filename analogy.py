@@ -71,7 +71,8 @@ class Model(object):
         """
         self.vgg19 = torchvision.models.vgg19(pretrained=False)
         del self.vgg19.classifier
-        self.vgg19.load_state_dict(torch.load('vgg19_conv.pth'))
+
+        self.vgg19.load_state_dict(torch.load('vgg19_caffe.pth'))
         self.vgg19.cuda()
 
     def extract(self, image, layers={1, 6, 11, 20, 29}):
@@ -235,39 +236,28 @@ class NeuralAnalogy(object):
 
         first_previous, second_previous = None, None
         for i, (first, second) in enumerate(zip(first_buffers, second_buffers)):
-            self.merge_flow(first, first_previous, second)
             first.origin = first_image
-
-            self.merge_flow(second, second_previous, first)
             second.origin = second_image
 
-            print(16-i*4)
-            for _ in range(16-i*4):
+            self.merge_flow(first, first_previous, second, layer=f'{i}.f')
+            self.merge_flow(second, second_previous, first, layer=f'{i}.s')
+
+            for _ in range(20-i*4):
                 self.compute_flow(first, second, layer=f'{i}.f')
                 self.compute_flow(second, first, layer=f'{i}.s')
             first_previous, second_previous = first, second
 
-        return scipy.misc.toimage(first_image, cmin=0, cmax=255), scipy.misc.toimage(second_image, cmin=0, cmax=255)
+        first_repro = self.warp_features(second_image.transpose((2,0,1))[np.newaxis], first.indices, padding=1)[0].transpose((1,2,0))
+        second_repro = self.warp_features(first_image.transpose((2,0,1))[np.newaxis], second.indices, padding=1)[0].transpose((1,2,0))
+        return scipy.misc.toimage(first_repro, cmin=0, cmax=255), scipy.misc.toimage(second_repro, cmin=0, cmax=255)
 
     def compute_flow(self, first, second, *, layer):
-        """
-        indices = first.indices
-        zoom = first.origin.shape[0] // indices.shape[0]
-        warped_image = np.zeros(first.origin.shape[:2]+(4,), dtype=np.float32)
-        for y in range(warped_image.shape[0]):
-            for x in range(warped_image.shape[1]):
-                v, u = indices[y // zoom, x // zoom]
-                warped_image[y, x, :3] = second.origin[v * zoom + y % zoom, u * zoom + x % zoom]
-                warped_image[y, x, 3] = 192 if (zoom > 1 and ((x//zoom) % 2) ^ ((y//zoom) % 2)) else 256
-        scipy.misc.toimage(warped_image.clip(0.0, 255.0), cmin=0, cmax=255).save(f'frames/{layer}_scaled.png')
-        """
-
         print('Computing warp via patch matching...')
         self.model.patches_initialize(first, second, padding=first.padding)
         score = first.scores.mean()
 
         print('  - Initialized with score', score)
-        for i in range(4):
+        for i in range(8):
             last, start = score, time.time()
             if i % 2 == 0:
                 self.model.patches_propagate(first, second, i // 2, padding=first.padding)
@@ -311,7 +301,7 @@ class NeuralAnalogy(object):
         scipy.misc.toimage(first.origin, cmin=0, cmax=255).save(f'frames/{layer}_target.png')
         scipy.misc.toimage((scores_array - scores_array.min()) * 255.0 / (scores_array.max() - scores_array.min()), cmin=0, cmax=255).save(f'frames/{layer}_scores.png')
 
-    def merge_flow(self, this, parent, other):
+    def merge_flow(self, this, parent, other, *, layer):
         if parent is None:
             # 1) Random search, this happens immediately after initalization anyway.
             # this.indices[:, :, 0] = np.random.randint(low=0, high=other.indices.shape[0], size=this.indices.shape[:2])
@@ -326,6 +316,17 @@ class NeuralAnalogy(object):
         zoomed = scipy.ndimage.interpolation.zoom(indices, zoom=(2, 2, 1), order=0)
         assert this.indices.shape == zoomed.shape
         this.indices[:, :] = zoomed
+
+
+        zoom = this.origin.shape[0] // this.indices.shape[0]
+        warped_image = np.zeros(this.origin.shape[:2]+(4,), dtype=np.float32)
+        for y in range(warped_image.shape[0]):
+            for x in range(warped_image.shape[1]):
+                v, u = this.indices[y // zoom, x // zoom]
+                warped_image[y, x, :3] = other.origin[v * zoom + y % zoom, u * zoom + x % zoom]
+                warped_image[y, x, 3] = 192 if (zoom > 1 and ((x//zoom) % 2) ^ ((y//zoom) % 2)) else 256
+        scipy.misc.toimage(warped_image.clip(0.0, 255.0), cmin=0, cmax=255).save(f'frames/{layer}_scaled.png')
+
 
         features_other = other.features_orign.data.cpu().numpy()
         features_warpd = self.warp_features(features_other, zoomed, p)
